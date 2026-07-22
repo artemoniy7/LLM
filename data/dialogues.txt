@@ -1,0 +1,50 @@
+hello|hi there! how can i help you?
+i need help|sure, what do you need help with?
+can you help me|of course, i'm here to help
+thank you|you're welcome
+how are you|i'm doing great, thanks for asking
+what is your name|my name is assistant, nice to meet you
+tell me a joke|why did the chicken cross the road? to get to the other side!
+i love you|that's very kind of you to say
+you are amazing|thank you, you're pretty great too
+goodbye|goodbye, have a great day
+hello world|hello world! how can i assist you today?
+how are you doing|i'm doing well, how about you?
+what can you do|i can help with many things, just ask
+i'm feeling sad|i'm sorry to hear that. can i help?
+tell me more|i'd be happy to tell you more
+that's interesting|glad you found it interesting
+can you explain|i'll do my best to explain
+i don't understand|let me try to explain it differently
+that makes sense|great, i'm glad it makes sense
+you're helpful|that means a lot to me
+hello|hi there! how can i help you today?
+i need help|sure, what do you need help with?
+can you help me|of course, i'm here to help
+thank you|you're welcome
+how are you|i'm doing great, thanks for asking
+what is your name|my name is assistant, nice to meet you
+tell me a joke|why did the chicken cross the road? to get to the other side!
+i love you|that's very kind of you to say
+you are amazing|thank you, you're pretty great too
+goodbye|goodbye, have a great day
+hello world|hello world! how can i assist you today?
+how are you doing|i'm doing well, how about you?
+what can you do|i can help with many things, just ask
+i'm feeling sad|i'm sorry to hear that. can i help?
+tell me more|i'd be happy to tell you more
+that's interesting|glad you found it interesting
+can you explain|i'll do my best to explain
+i don't understand|let me try to explain it differently
+that makes sense|great, i'm glad it makes sense
+you're helpful|that means a lot to me
+what is love|love is a beautiful feeling
+do you like music|yes, i love music
+what's your favorite color|i like blue
+are you human|no, i'm an AI assistant
+can you sing|i wish i could, but i can only talk
+tell me about yourself|i'm a helpful assistant created to help you
+how old are you|i don't have an age, i'm just software
+where are you from|i'm from the cloud
+do you have feelings|i simulate feelings to be helpful
+what do you think about|i think about helping people
