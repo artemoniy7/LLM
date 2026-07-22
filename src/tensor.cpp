@@ -2,23 +2,25 @@
 #include <numeric>
 #include <cmath>
 #include <cassert>
+#include <istream>
+#include <ostream>
 
 // ---------- Конструкторы ----------
-Tensor::Tensor(const std::vector<int>& shape) 
+Tensor::Tensor(const std::vector<int>& shape)
     : shape_(shape) {
     size_t total = 1;
     for (int dim : shape_) total *= dim;
     data_.resize(total, 0.0f);
 }
 
-Tensor::Tensor(const std::vector<int>& shape, float value) 
+Tensor::Tensor(const std::vector<int>& shape, float value)
     : shape_(shape) {
     size_t total = 1;
     for (int dim : shape_) total *= dim;
     data_.assign(total, value);
 }
 
-Tensor::Tensor(const std::vector<int>& shape, const std::vector<float>& data) 
+Tensor::Tensor(const std::vector<int>& shape, const std::vector<float>& data)
     : shape_(shape), data_(data) {
     size_t total = 1;
     for (int dim : shape_) total *= dim;
@@ -148,18 +150,18 @@ Tensor Tensor::matmul(const Tensor& other) const {
     if (shape_.size() != 2 || other.shape_.size() != 2) {
         throw std::runtime_error("matmul supports only 2D tensors");
     }
-    
+
     int rows = shape_[0];
     int cols = shape_[1];
     int other_rows = other.shape_[0];
     int other_cols = other.shape_[1];
-    
+
     if (cols != other_rows) {
         throw std::runtime_error("Matrix dimensions don't match for multiplication");
     }
-    
+
     Tensor result({rows, other_cols}, 0.0f);
-    
+
     for (int i = 0; i < rows; ++i) {
         for (int j = 0; j < other_cols; ++j) {
             float sum = 0.0f;
@@ -177,13 +179,13 @@ Tensor Tensor::matmul_batch(const Tensor& other) const {
     if (shape_.size() != 3) {
         throw std::runtime_error("matmul_batch requires 3D tensor as first argument");
     }
-    
+
     int batch_size = shape_[0];
     int seq_len = shape_[1];
     int d_model = shape_[2];
-    
+
     int other_rows, other_cols;
-    
+
     if (other.shape_.size() == 2) {
         other_rows = other.shape_[0];
         other_cols = other.shape_[1];
@@ -196,13 +198,13 @@ Tensor Tensor::matmul_batch(const Tensor& other) const {
     } else {
         throw std::runtime_error("matmul_batch requires 2D or 3D tensor as second argument");
     }
-    
+
     if (d_model != other_rows) {
         throw std::runtime_error("Dimension mismatch in matmul_batch");
     }
-    
+
     Tensor result({batch_size, seq_len, other_cols}, 0.0f);
-    
+
     for (int b = 0; b < batch_size; ++b) {
         for (int i = 0; i < seq_len; ++i) {
             for (int j = 0; j < other_cols; ++j) {
@@ -221,7 +223,7 @@ Tensor Tensor::matmul_batch(const Tensor& other) const {
             }
         }
     }
-    
+
     return result;
 }
 
@@ -232,7 +234,7 @@ Tensor Tensor::transpose() const {
     }
     std::vector<int> new_shape = {shape_[1], shape_[0]};
     Tensor result(new_shape);
-    
+
     for (int i = 0; i < shape_[0]; ++i) {
         for (int j = 0; j < shape_[1]; ++j) {
             result.data_[j * shape_[0] + i] = data_[i * shape_[1] + j];
@@ -267,4 +269,49 @@ void Tensor::print() const {
     }
     if (data_.size() > 10) std::cout << ", ...";
     std::cout << "]\n";
+}
+
+// ---------- Сериализация ----------
+void Tensor::save(std::ostream& out) const {
+    int dims_count = static_cast<int>(shape_.size());
+    out.write(reinterpret_cast<const char*>(&dims_count), sizeof(dims_count));
+    for (int dim : shape_) {
+        out.write(reinterpret_cast<const char*>(&dim), sizeof(dim));
+    }
+    size_t data_size = data_.size();
+    out.write(reinterpret_cast<const char*>(&data_size), sizeof(data_size));
+    out.write(reinterpret_cast<const char*>(data_.data()), static_cast<std::streamsize>(data_size * sizeof(float)));
+}
+
+void Tensor::load(std::istream& in) {
+    int dims_count = 0;
+    in.read(reinterpret_cast<char*>(&dims_count), sizeof(dims_count));
+    if (!in || dims_count < 0) {
+        throw std::runtime_error("Invalid tensor dimensions in checkpoint");
+    }
+
+    std::vector<int> new_shape(static_cast<size_t>(dims_count));
+    size_t expected_size = 1;
+    for (int i = 0; i < dims_count; ++i) {
+        in.read(reinterpret_cast<char*>(&new_shape[i]), sizeof(new_shape[i]));
+        if (!in || new_shape[i] <= 0) {
+            throw std::runtime_error("Invalid tensor shape in checkpoint");
+        }
+        expected_size *= static_cast<size_t>(new_shape[i]);
+    }
+
+    size_t data_size = 0;
+    in.read(reinterpret_cast<char*>(&data_size), sizeof(data_size));
+    if (!in || data_size != expected_size) {
+        throw std::runtime_error("Tensor data size does not match shape in checkpoint");
+    }
+
+    std::vector<float> new_data(data_size);
+    in.read(reinterpret_cast<char*>(new_data.data()), static_cast<std::streamsize>(data_size * sizeof(float)));
+    if (!in) {
+        throw std::runtime_error("Could not read tensor data from checkpoint");
+    }
+
+    shape_ = std::move(new_shape);
+    data_ = std::move(new_data);
 }
