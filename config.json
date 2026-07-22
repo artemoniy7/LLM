@@ -1,0 +1,25 @@
+{
+  "dataset_path": "data/pippa.jsonl",
+  "dataset_format": "pippa_jsonl",
+  "checkpoint_path": "model.ckpt",
+  "model": {
+    "vocab_size": 0,
+    "d_model": 64,
+    "num_heads": 4,
+    "num_layers": 4,
+    "d_ff": 128,
+    "max_len": 80
+  },
+  "training": {
+    "learning_rate": 0.001,
+    "epochs": 50,
+    "max_samples": 100,
+    "print_every": 5,
+    "test_every": 10
+  },
+  "chat": {
+    "temperature": 0.8,
+    "max_response_tokens": 40,
+    "system_prompt": "You are a helpful assistant for roleplay. Respond in character."
+  }
+}

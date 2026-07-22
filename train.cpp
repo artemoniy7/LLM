@@ -1,288 +1,308 @@
-#include "transformer.hpp"
+#include "config.hpp"
 #include "tokenizer.hpp"
-#include <iostream>
-#include <fstream>
-#include <vector>
-#include <string>
-#include <chrono>
-#include <random>
-#include <exception>
+#include "transformer.hpp"
 #include <algorithm>
-#include <cmath>
+#include <chrono>
+#include <exception>
+#include <fstream>
+#include <iostream>
+#include <limits>
+#include <cctype>
+#include <random>
+#include <sstream>
+#include <string>
+#include <utility>
+#include <vector>
 
-// Загрузка датасета
-std::vector<std::pair<std::string, std::string>> load_dataset(const std::string& filename) {
-    std::vector<std::pair<std::string, std::string>> dataset;
-    std::ifstream file(filename);
-    std::string line;
-    
-    if (!file.is_open()) {
-        std::cerr << "Error: Could not open file " << filename << "\n";
-        return dataset;
+struct Dialogue {
+    std::vector<std::pair<std::string, std::string>> turns;
+};
+
+static std::string trim(std::string value) {
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front()))) {
+        value.erase(value.begin());
     }
-    
-    while (std::getline(file, line)) {
-        if (line.empty()) continue;
-        size_t pos = line.find('|');
-        if (pos != std::string::npos) {
-            std::string user = line.substr(0, pos);
-            std::string assistant = line.substr(pos + 1);
-            while (!user.empty() && user.back() == ' ') user.pop_back();
-            while (!assistant.empty() && assistant.front() == ' ') assistant.erase(0, 1);
-            dataset.push_back({user, assistant});
-        }
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back()))) {
+        value.pop_back();
     }
-    
-    return dataset;
+    return value;
 }
 
-// Подготовка данных для обучения
-std::vector<Tensor> prepare_data(const std::vector<std::pair<std::string, std::string>>& dataset, 
-                                  SimpleTokenizer& tokenizer, int max_len) {
-    std::vector<Tensor> data;
-    
-    for (const auto& pair : dataset) {
+static void add_turn(Dialogue& dialogue, const std::string& role, const std::string& text) {
+    std::string cleaned = trim(text);
+    if (!cleaned.empty()) {
+        dialogue.turns.push_back({role, cleaned});
+    }
+}
+
+static std::vector<std::pair<std::string, std::string>> parse_pippa_definitions(const std::string& definitions,
+                                                                                 int max_lines = 8) {
+    std::vector<std::pair<std::string, std::string>> turns;
+    std::istringstream stream(definitions);
+    std::string line;
+
+    while (std::getline(stream, line) && static_cast<int>(turns.size()) < max_lines) {
+        size_t user_pos = line.find("{{user}}:");
+        size_t char_pos = line.find("{{char}}:");
+
+        if (user_pos != std::string::npos) {
+            turns.push_back({"user", trim(line.substr(user_pos + 9))});
+        } else if (char_pos != std::string::npos) {
+            turns.push_back({"assistant", trim(line.substr(char_pos + 9))});
+        }
+    }
+
+    return turns;
+}
+
+static std::vector<Dialogue> load_pippa_jsonl(const std::string& filename, int max_samples) {
+    std::vector<Dialogue> dialogues;
+    std::ifstream file(filename);
+    std::string line;
+
+    if (!file.is_open()) {
+        std::cerr << "Error: could not open dataset " << filename << "\n";
+        return dialogues;
+    }
+
+    while (std::getline(file, line) && static_cast<int>(dialogues.size()) < max_samples) {
+        if (trim(line).empty()) {
+            continue;
+        }
+
         try {
-            std::string text = "User: " + pair.first + " Assistant: " + pair.second;
-            std::vector<int> tokens = tokenizer.encode(text);
-            
-            if ((int)tokens.size() > max_len) {
-                tokens.resize(max_len);
+            nlohmann::json row = nlohmann::json::parse(line);
+            Dialogue dialogue;
+
+            add_turn(dialogue, "assistant", row.value("bot_greeting", ""));
+            for (const auto& turn : parse_pippa_definitions(row.value("bot_definitions", ""))) {
+                add_turn(dialogue, turn.first, turn.second);
             }
-            
-            if (tokens.size() < 3) continue;
-            
-            Tensor input({1, (int)tokens.size()});
-            for (int i = 0; i < (int)tokens.size(); ++i) {
-                input.at({0, i}) = tokens[i];
+
+            if (!dialogue.turns.empty()) {
+                dialogues.push_back(dialogue);
             }
-            data.push_back(input);
-        } catch (const std::exception& e) {
+        } catch (const std::exception&) {
             continue;
         }
     }
-    
-    return data;
+
+    return dialogues;
 }
 
-// Перемешивание данных
-void shuffle_data(std::vector<Tensor>& data) {
+static std::vector<Dialogue> load_pipe_dialogues(const std::string& filename, int max_samples) {
+    std::vector<Dialogue> dialogues;
+    std::ifstream file(filename);
+    std::string line;
+
+    if (!file.is_open()) {
+        std::cerr << "Error: could not open dataset " << filename << "\n";
+        return dialogues;
+    }
+
+    while (std::getline(file, line) && static_cast<int>(dialogues.size()) < max_samples) {
+        size_t separator = line.find('|');
+        if (separator == std::string::npos) {
+            continue;
+        }
+
+        Dialogue dialogue;
+        add_turn(dialogue, "user", line.substr(0, separator));
+        add_turn(dialogue, "assistant", line.substr(separator + 1));
+        if (!dialogue.turns.empty()) {
+            dialogues.push_back(dialogue);
+        }
+    }
+
+    return dialogues;
+}
+
+static std::vector<Dialogue> load_dataset(const AppConfig& config) {
+    if (config.dataset_format == "pipe") {
+        return load_pipe_dialogues(config.dataset_path, config.max_samples);
+    }
+    return load_pippa_jsonl(config.dataset_path, config.max_samples);
+}
+
+static std::vector<Tensor> prepare_data(const std::vector<Dialogue>& dialogues,
+                                        SimpleTokenizer& tokenizer,
+                                        int max_len) {
+    std::vector<Tensor> samples;
+
+    for (const auto& dialogue : dialogues) {
+        std::string text;
+        for (const auto& turn : dialogue.turns) {
+            text += (turn.first == "user" ? "User: " : "Assistant: ");
+            text += turn.second;
+            text += ' ';
+        }
+
+        std::vector<int> tokens = tokenizer.encode(text);
+        if (static_cast<int>(tokens.size()) > max_len) {
+            tokens.resize(max_len);
+        }
+        if (tokens.size() < 3) {
+            continue;
+        }
+
+        Tensor input({1, static_cast<int>(tokens.size())});
+        for (int i = 0; i < static_cast<int>(tokens.size()); ++i) {
+            input.at({0, i}) = tokens[i];
+        }
+        samples.push_back(input);
+    }
+
+    return samples;
+}
+
+static void shuffle_data(std::vector<Tensor>& data) {
     std::random_device rd;
-    std::mt19937 g(rd());
-    std::shuffle(data.begin(), data.end(), g);
+    std::mt19937 generator(rd());
+    std::shuffle(data.begin(), data.end(), generator);
+}
+
+static void print_sample_generation(GPT& model, SimpleTokenizer& tokenizer, const AppConfig& config) {
+    std::vector<int> prompt = tokenizer.encode("User: hello");
+    std::vector<int> response = model.generate(prompt, 10, config.temperature);
+    std::cout << "  Prompt: User: hello\n";
+    std::cout << "  Response: " << tokenizer.decode(response) << "\n\n";
 }
 
 int main() {
-    std::cout << "=== Training LLM for RP ===\n\n";
-    
+    std::cout << "=== LLM Training ===\n\n";
+
     try {
-        // Параметры модели
-        int vocab_size = 300;
-        int d_model = 64;
-        int num_heads = 4;
-        int num_layers = 4;
-        int d_ff = 128;
-        int max_len = 50;
-        
-        std::cout << "Creating model with params:\n";
-        std::cout << "  d_model: " << d_model << "\n";
-        std::cout << "  num_layers: " << num_layers << "\n";
-        std::cout << "  d_ff: " << d_ff << "\n";
-        std::cout << "  max_len: " << max_len << "\n\n";
-        
-        GPT model(vocab_size, d_model, num_heads, num_layers, d_ff, max_len);
-        std::cout << "Model created!\n";
-        
+        AppConfig config = load_config();
         SimpleTokenizer tokenizer;
-        std::cout << "Tokenizer created! Vocab size: " << tokenizer.vocab_size() << "\n";
-        
-        std::cout << "Loading dataset...\n";
-        auto dataset = load_dataset("data/dialogues.txt");
-        std::cout << "Loaded " << dataset.size() << " dialogues\n";
-        
-        if (dataset.empty()) {
-            std::cerr << "Error: No data loaded! Create data/dialogues.txt file.\n";
+        int vocab_size = config.vocab_size > 0 ? config.vocab_size : tokenizer.vocab_size();
+
+        std::cout << "Dataset: " << config.dataset_path << " (" << config.dataset_format << ")\n";
+        std::cout << "Checkpoint: " << config.checkpoint_path << "\n";
+        std::cout << "Model: vocab=" << vocab_size
+                  << ", d_model=" << config.d_model
+                  << ", heads=" << config.num_heads
+                  << ", layers=" << config.num_layers
+                  << ", d_ff=" << config.d_ff
+                  << ", max_len=" << config.max_len << "\n\n";
+
+        GPT model(vocab_size, config.d_model, config.num_heads, config.num_layers, config.d_ff, config.max_len);
+        if (model.load(config.checkpoint_path)) {
+            std::cout << "Checkpoint loaded; continuing training.\n";
+        } else {
+            std::cout << "No checkpoint found; training from scratch.\n";
+        }
+
+        std::vector<Dialogue> dialogues = load_dataset(config);
+        std::cout << "Loaded " << dialogues.size() << " dialogues\n";
+        if (dialogues.empty()) {
+            std::cerr << "No training data loaded. Check config.json dataset_path and dataset_format.\n";
             return 1;
         }
-        
-        std::cout << "Sample dialogues:\n";
-        for (size_t i = 0; i < std::min(dataset.size(), size_t(3)); ++i) {
-            std::cout << "  User: " << dataset[i].first << " -> Assistant: " << dataset[i].second << "\n";
-        }
-        std::cout << "\n";
-        
-        std::cout << "Preparing data...\n";
-        auto data = prepare_data(dataset, tokenizer, max_len);
+
+        std::vector<Tensor> data = prepare_data(dialogues, tokenizer, config.max_len);
         std::cout << "Prepared " << data.size() << " samples\n";
-        
         if (data.empty()) {
-            std::cerr << "Error: No data prepared!\n";
+            std::cerr << "No usable samples prepared.\n";
             return 1;
         }
-        
-        std::cout << "Starting training...\n\n";
-        
-        float learning_rate = 0.001f;  // Уменьшили LR
-        int epochs = 500;
-        int print_every = 10;
-        int test_every = 50;
-        
+
         auto start_time = std::chrono::high_resolution_clock::now();
-        
-        // Для отслеживания лучшего loss
-        float best_loss = 100.0f;
-        
-        for (int epoch = 0; epoch < epochs; ++epoch) {
+        float best_loss = std::numeric_limits<float>::max();
+
+        for (int epoch = 0; epoch < config.epochs; ++epoch) {
             float total_loss = 0.0f;
             int batches = 0;
-            
             shuffle_data(data);
-            
-            for (size_t i = 0; i < data.size(); ++i) {
+
+            for (const auto& input : data) {
                 try {
-                    Tensor input = data[i];
                     int seq_len = input.shape()[1];
-                    
-                    // Forward pass
                     Tensor hidden = model.forward(input);
                     Tensor logits = model.get_logits(hidden);
-                    
-                    // Вычисляем loss для всех позиций
+
                     float sample_loss = 0.0f;
                     int valid_positions = 0;
-                    
-                    // Собираем все градиенты
-                    std::vector<Tensor> gradients;
-                    
+                    int last_valid_pos = -1;
+
                     for (int pos = 0; pos < seq_len - 1; ++pos) {
-                        int target_token = (int)input.at({0, pos + 1});
-                        
-                        // Пропускаем специальные токены
+                        int target_token = static_cast<int>(input.at({0, pos + 1}));
                         if (target_token == 0 || target_token == 1 || target_token == 3) {
                             continue;
                         }
-                        
-                        // Создаем предсказание для текущей позиции
+
                         Tensor pred({1, vocab_size});
                         for (int v = 0; v < vocab_size; ++v) {
                             pred.at({0, v}) = logits.at({0, pos, v});
                         }
-                        
-                        Tensor targ({1, 1});
-                        targ.at({0, 0}) = target_token;
-                        
+
+                        Tensor target({1, 1});
+                        target.at({0, 0}) = target_token;
                         CrossEntropyLoss loss_fn;
-                        float loss = loss_fn.forward(pred, targ);
-                        sample_loss += loss;
+                        sample_loss += loss_fn.forward(pred, target);
                         valid_positions++;
-                        
-                        // Сохраняем градиент для этой позиции
-                        Tensor grad = loss_fn.backward();
-                        gradients.push_back(grad);
+                        last_valid_pos = pos;
                     }
-                    
-                    if (valid_positions == 0) continue;
-                    
-                    // Усредняем loss
-                    float avg_loss = sample_loss / valid_positions;
-                    total_loss += avg_loss;
+
+                    if (valid_positions == 0) {
+                        continue;
+                    }
+
+                    total_loss += sample_loss / valid_positions;
                     batches++;
-                    
-                    // Усредняем градиенты по всем позициям
-                    if (!gradients.empty()) {
-                        Tensor avg_grad({1, vocab_size}, 0.0f);
-                        for (const auto& g : gradients) {
-                            for (int v = 0; v < vocab_size; ++v) {
-                                avg_grad.at({0, v}) += g.at({0, v});
-                            }
-                        }
-                        for (int v = 0; v < vocab_size; ++v) {
-                            avg_grad.at({0, v}) /= gradients.size();
-                        }
-                        
-                        // Применяем градиент ко всем позициям
-                        Tensor grad_3d({1, seq_len, vocab_size});
-                        for (int pos = 0; pos < seq_len; ++pos) {
-                            for (int v = 0; v < vocab_size; ++v) {
-                                grad_3d.at({0, pos, v}) = avg_grad.at({0, v});
-                            }
-                        }
-                        
-                        model.backward(grad_3d, learning_rate);
-                        model.update(learning_rate);
+
+                    int target_token = static_cast<int>(input.at({0, last_valid_pos + 1}));
+                    Tensor pred({1, vocab_size});
+                    for (int v = 0; v < vocab_size; ++v) {
+                        pred.at({0, v}) = logits.at({0, last_valid_pos, v});
                     }
-                    
-                } catch (const std::exception& e) {
+
+                    Tensor target({1, 1});
+                    target.at({0, 0}) = target_token;
+                    CrossEntropyLoss loss_fn;
+                    loss_fn.forward(pred, target);
+                    Tensor grad = loss_fn.backward();
+
+                    Tensor grad_3d({1, seq_len, vocab_size}, 0.0f);
+                    for (int v = 0; v < vocab_size; ++v) {
+                        grad_3d.at({0, last_valid_pos, v}) = grad.at({0, v});
+                    }
+
+                    model.backward(grad_3d, config.learning_rate);
+                    model.update(config.learning_rate);
+                } catch (const std::exception&) {
                     continue;
                 }
             }
-            
-            // Выводим прогресс
-            if ((epoch + 1) % print_every == 0) {
-                auto end_time = std::chrono::high_resolution_clock::now();
-                auto duration = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time);
-                
-                float avg_loss = (batches > 0) ? total_loss / batches : 0.0f;
-                
-                // Обновляем лучший loss
+
+            if ((epoch + 1) % config.print_every == 0) {
+                auto now = std::chrono::high_resolution_clock::now();
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time);
+                float avg_loss = batches > 0 ? total_loss / batches : 0.0f;
+
                 if (avg_loss < best_loss) {
                     best_loss = avg_loss;
+                    model.save(config.checkpoint_path);
+                    std::cout << "Saved best checkpoint.\n";
                 }
-                
-                std::cout << "Epoch " << (epoch + 1) << "/" << epochs 
+
+                std::cout << "Epoch " << (epoch + 1) << "/" << config.epochs
                           << " | Loss: " << avg_loss
                           << " | Best: " << best_loss
                           << " | Batches: " << batches
-                          << " | Time: " << duration.count() << "s\n";
-                
-                if ((epoch + 1) % test_every == 0) {
-                    std::cout << "\nTesting generation:\n";
-                    try {
-                        std::vector<int> prompt = tokenizer.encode("User: hello");
-                        std::vector<int> response = model.generate(prompt, 10, 0.7f);
-                        std::string text = tokenizer.decode(response);
-                        std::cout << "  Prompt: User: hello\n";
-                        std::cout << "  Response: " << text << "\n\n";
-                    } catch (const std::exception& e) {
-                        std::cout << "  Error generating: " << e.what() << "\n\n";
-                    }
+                          << " | Time: " << elapsed.count() << "s\n";
+
+                if (config.test_every > 0 && (epoch + 1) % config.test_every == 0) {
+                    print_sample_generation(model, tokenizer, config);
                 }
             }
         }
-        
-        std::cout << "\nTraining complete!\n";
-        std::cout << "Best loss achieved: " << best_loss << "\n";
-        
-        // Тестируем финальную модель
-        std::cout << "\nTesting trained model:\n";
-        std::vector<std::string> test_prompts = {
-            "hello",
-            "how are you",
-            "i need help",
-            "tell me a joke",
-            "goodbye"
-        };
-        
-        for (const auto& test_prompt : test_prompts) {
-            try {
-                std::string full_prompt = "User: " + test_prompt;
-                std::vector<int> prompt = tokenizer.encode(full_prompt);
-                std::vector<int> response = model.generate(prompt, 15, 0.7f);
-                std::string text = tokenizer.decode(response);
-                std::cout << "  User: " << test_prompt << "\n";
-                std::cout << "  Assistant: " << text << "\n\n";
-            } catch (const std::exception& e) {
-                std::cout << "  Error: " << e.what() << "\n\n";
-            }
-        }
-        
+
+        model.save(config.checkpoint_path);
+        std::cout << "Training complete. Final checkpoint saved to " << config.checkpoint_path << "\n";
     } catch (const std::exception& e) {
         std::cerr << "Fatal error: " << e.what() << "\n";
-        system("pause");
         return 1;
     }
-    
-    std::cout << "\nDone!\n";
-    system("pause");
+
     return 0;
 }

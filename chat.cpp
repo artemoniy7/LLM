@@ -1,89 +1,66 @@
-#include "transformer.hpp"
+#include "config.hpp"
 #include "tokenizer.hpp"
+#include "transformer.hpp"
+#include <algorithm>
+#include <exception>
 #include <iostream>
 #include <string>
+#include <vector>
 
 int main() {
-    std::cout << "=== RP Chat Interface ===\n\n";
-    
-    // Параметры модели
-    int vocab_size = 200;
-    int d_model = 64;
-    int num_heads = 4;
-    int num_layers = 3;
-    int d_ff = 128;
-    int max_len = 50;
-    
-    std::cout << "Loading model...\n";
-    GPT model(vocab_size, d_model, num_heads, num_layers, d_ff, max_len);
-    SimpleTokenizer tokenizer;
-    
-    std::cout << "Model loaded!\n";
-    std::cout << "Vocabulary size: " << tokenizer.vocab_size() << "\n\n";
-    
-    std::cout << "=== RP Chat ===\n";
-    std::cout << "Type your messages. Type 'exit' to quit.\n";
-    std::cout << "Type 'clear' to clear history.\n\n";
-    
-    std::vector<int> history;
-    float temperature = 0.8f;
-    int max_response_tokens = 30;
-    
-    // Системный промпт для RP
-    std::string system_prompt = "You are a helpful assistant for roleplay. Respond in character.";
-    std::vector<int> system_tokens = tokenizer.encode(system_prompt);
-    history.insert(history.end(), system_tokens.begin(), system_tokens.end());
-    
-    std::string input;
-    while (true) {
-        std::cout << "You: ";
-        std::getline(std::cin, input);
-        
-        if (input == "exit") {
-            break;
+    std::cout << "=== LLM Chat ===\n\n";
+
+    try {
+        AppConfig config = load_config();
+        SimpleTokenizer tokenizer;
+        int vocab_size = config.vocab_size > 0 ? config.vocab_size : tokenizer.vocab_size();
+
+        std::cout << "Checkpoint: " << config.checkpoint_path << "\n";
+        GPT model(vocab_size, config.d_model, config.num_heads, config.num_layers, config.d_ff, config.max_len);
+        if (model.load(config.checkpoint_path)) {
+            std::cout << "Checkpoint loaded.\n";
+        } else {
+            std::cout << "No checkpoint found. Chat will use random weights until you run training.\n";
         }
-        if (input == "clear") {
-            history.clear();
-            history.insert(history.end(), system_tokens.begin(), system_tokens.end());
-            std::cout << "History cleared.\n\n";
-            continue;
-        }
-        
-        // Токенизируем ввод
-        std::vector<int> input_tokens = tokenizer.encode(input);
-        history.insert(history.end(), input_tokens.begin(), input_tokens.end());
-        
-        // Генерируем ответ
-        std::cout << "Assistant: ";
-        std::cout.flush();
-        
-        try {
-            // Берем последние max_len токенов для генерации
-            int seq_len = std::min((int)history.size(), max_len);
-            int start = history.size() - seq_len;
-            std::vector<int> prompt(history.begin() + start, history.end());
-            
-            std::vector<int> response = model.generate(prompt, max_response_tokens, temperature);
-            
-            // Декодируем и выводим ответ
-            std::string response_text = tokenizer.decode(response);
-            
-            // Убираем системный промпт из вывода
-            size_t pos = response_text.find(system_prompt);
-            if (pos != std::string::npos) {
-                response_text = response_text.substr(pos + system_prompt.length());
+
+        std::cout << "Type your messages. Type 'exit' to quit, 'clear' to clear history.\n\n";
+
+        std::vector<int> history = tokenizer.encode(config.system_prompt);
+        std::string input;
+
+        while (true) {
+            std::cout << "You: ";
+            if (!std::getline(std::cin, input)) {
+                break;
             }
-            
-            std::cout << response_text << "\n\n";
-            
-            // Добавляем ответ в историю
+
+            if (input == "exit") {
+                break;
+            }
+            if (input == "clear") {
+                history = tokenizer.encode(config.system_prompt);
+                std::cout << "History cleared.\n\n";
+                continue;
+            }
+
+            std::vector<int> user_tokens = tokenizer.encode("User: " + input);
+            history.insert(history.end(), user_tokens.begin(), user_tokens.end());
+
+            int seq_len = std::min(static_cast<int>(history.size()), config.max_len);
+            int start = static_cast<int>(history.size()) - seq_len;
+            std::vector<int> prompt(history.begin() + start, history.end());
+
+            std::vector<int> response = model.generate(prompt, config.max_response_tokens, config.temperature);
+            std::string response_text = tokenizer.decode(response);
+            std::cout << "Assistant: " << response_text << "\n\n";
+
             history.insert(history.end(), response.begin(), response.end());
-            
-        } catch (const std::exception& e) {
-            std::cerr << "Error: " << e.what() << "\n";
         }
+    } catch (const std::exception& e) {
+        std::cerr << "Fatal error: " << e.what() << "\n";
+        return 1;
     }
-    
-    std::cout << "\nGoodbye!\n";
+
+    std::cout << "Goodbye!\n";
     return 0;
 }
