@@ -32,11 +32,24 @@ Tensor Linear::forward(const Tensor& input) {
     input_cache_ = input;
 
     if (input.dims() == 2) {
-        Tensor output = input.matmul(weights_.transpose());
+        int batch_size = input.shape()[0];
+        int in_features = input.shape()[1];
+        int out_features = weights_.shape()[0];
 
-        for (int i = 0; i < output.shape()[0]; ++i) {
-            for (int j = 0; j < output.shape()[1]; ++j) {
-                output.at({i, j}) += bias_.at({0, j});
+        if (in_features != weights_.shape()[1]) {
+            throw std::runtime_error("Input feature dimension mismatch");
+        }
+
+        Tensor output({batch_size, out_features});
+        for (int b = 0; b < batch_size; ++b) {
+            for (int o = 0; o < out_features; ++o) {
+                float sum = bias_[o];
+                int weight_offset = o * in_features;
+                int input_offset = b * in_features;
+                for (int i = 0; i < in_features; ++i) {
+                    sum += input[input_offset + i] * weights_[weight_offset + i];
+                }
+                output[b * out_features + o] = sum;
             }
         }
         return output;
@@ -44,28 +57,24 @@ Tensor Linear::forward(const Tensor& input) {
         int batch_size = input.shape()[0];
         int seq_len = input.shape()[1];
         int in_features = input.shape()[2];
+        int out_features = weights_.shape()[0];
 
         if (in_features != weights_.shape()[1]) {
             throw std::runtime_error("Input feature dimension mismatch");
         }
 
-        Tensor output({batch_size, seq_len, weights_.shape()[0]});
-
+        Tensor output({batch_size, seq_len, out_features});
         for (int b = 0; b < batch_size; ++b) {
             for (int s = 0; s < seq_len; ++s) {
-                Tensor token({1, in_features});
-                for (int d = 0; d < in_features; ++d) {
-                    token.at({0, d}) = input.at({b, s, d});
-                }
-
-                Tensor token_out = token.matmul(weights_.transpose());
-
-                for (int j = 0; j < token_out.shape()[1]; ++j) {
-                    token_out.at({0, j}) += bias_.at({0, j});
-                }
-
-                for (int j = 0; j < token_out.shape()[1]; ++j) {
-                    output.at({b, s, j}) = token_out.at({0, j});
+                int input_offset = (b * seq_len + s) * in_features;
+                int output_offset = (b * seq_len + s) * out_features;
+                for (int o = 0; o < out_features; ++o) {
+                    float sum = bias_[o];
+                    int weight_offset = o * in_features;
+                    for (int i = 0; i < in_features; ++i) {
+                        sum += input[input_offset + i] * weights_[weight_offset + i];
+                    }
+                    output[output_offset + o] = sum;
                 }
             }
         }
@@ -76,16 +85,29 @@ Tensor Linear::forward(const Tensor& input) {
 }
 
 Tensor Linear::backward(const Tensor& grad_output, float learning_rate) {
+    Tensor grad_input;
+
     if (grad_output.dims() == 2) {
-        Tensor grad_input = grad_output.matmul(weights_);
+        int batch_size = grad_output.shape()[0];
+        int out_features = grad_output.shape()[1];
+        int in_features = input_cache_.shape()[1];
 
-        Tensor input_t = input_cache_.transpose();
-        grad_weights_ = input_t.matmul(grad_output);
+        grad_input = Tensor({batch_size, in_features}, 0.0f);
+        grad_weights_ = Tensor({out_features, in_features}, 0.0f);
+        grad_bias_ = Tensor({1, out_features}, 0.0f);
 
-        grad_bias_ = Tensor({1, grad_output.shape()[1]}, 0.0f);
-        for (int i = 0; i < grad_output.shape()[0]; ++i) {
-            for (int j = 0; j < grad_output.shape()[1]; ++j) {
-                grad_bias_.at({0, j}) += grad_output.at({i, j});
+        for (int b = 0; b < batch_size; ++b) {
+            int input_offset = b * in_features;
+            int grad_output_offset = b * out_features;
+            int grad_input_offset = b * in_features;
+            for (int o = 0; o < out_features; ++o) {
+                float go = grad_output[grad_output_offset + o];
+                grad_bias_[o] += go;
+                int weight_offset = o * in_features;
+                for (int i = 0; i < in_features; ++i) {
+                    grad_input[grad_input_offset + i] += go * weights_[weight_offset + i];
+                    grad_weights_[weight_offset + i] += input_cache_[input_offset + i] * go;
+                }
             }
         }
     } else if (grad_output.dims() == 3) {
@@ -94,44 +116,32 @@ Tensor Linear::backward(const Tensor& grad_output, float learning_rate) {
         int out_features = grad_output.shape()[2];
         int in_features = input_cache_.shape()[2];
 
-        Tensor grad_input({batch_size, seq_len, in_features}, 0.0f);
+        grad_input = Tensor({batch_size, seq_len, in_features}, 0.0f);
         grad_weights_ = Tensor({out_features, in_features}, 0.0f);
         grad_bias_ = Tensor({1, out_features}, 0.0f);
 
         for (int b = 0; b < batch_size; ++b) {
             for (int s = 0; s < seq_len; ++s) {
-                Tensor grad_token({1, out_features});
-                for (int j = 0; j < out_features; ++j) {
-                    grad_token.at({0, j}) = grad_output.at({b, s, j});
-                }
-
-                Tensor input_token({1, in_features});
-                for (int d = 0; d < in_features; ++d) {
-                    input_token.at({0, d}) = input_cache_.at({b, s, d});
-                }
-
-                Tensor grad_input_token = grad_token.matmul(weights_);
-                for (int d = 0; d < in_features; ++d) {
-                    grad_input.at({b, s, d}) = grad_input_token.at({0, d});
-                }
-
-                Tensor input_t = input_token.transpose();
-                Tensor grad_weights_token = input_t.matmul(grad_token);
-                for (int i = 0; i < out_features; ++i) {
-                    for (int j = 0; j < in_features; ++j) {
-                        grad_weights_.at({i, j}) += grad_weights_token.at({i, j});
+                int input_offset = (b * seq_len + s) * in_features;
+                int grad_output_offset = (b * seq_len + s) * out_features;
+                int grad_input_offset = (b * seq_len + s) * in_features;
+                for (int o = 0; o < out_features; ++o) {
+                    float go = grad_output[grad_output_offset + o];
+                    grad_bias_[o] += go;
+                    int weight_offset = o * in_features;
+                    for (int i = 0; i < in_features; ++i) {
+                        grad_input[grad_input_offset + i] += go * weights_[weight_offset + i];
+                        grad_weights_[weight_offset + i] += input_cache_[input_offset + i] * go;
                     }
-                }
-
-                for (int j = 0; j < out_features; ++j) {
-                    grad_bias_.at({0, j}) += grad_output.at({b, s, j});
                 }
             }
         }
+    } else {
+        throw std::runtime_error("Linear backward supports only 2D or 3D tensors");
     }
 
     update(learning_rate);
-    return input_cache_;
+    return grad_input;
 }
 
 void Linear::update(float learning_rate) {

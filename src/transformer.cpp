@@ -126,60 +126,16 @@ Tensor MultiHeadAttention::scaled_dot_product_attention(const Tensor& q, const T
 
 Tensor MultiHeadAttention::forward(const Tensor& input) {
     // input: (batch_size, seq_len, d_model)
-    int batch_size = input.shape()[0];
-    int seq_len = input.shape()[1];
-
-    // Применяем линейные слои к каждому токену отдельно
-    Tensor q({batch_size, seq_len, d_model_});
-    Tensor k({batch_size, seq_len, d_model_});
-    Tensor v({batch_size, seq_len, d_model_});
-
-    for (int b = 0; b < batch_size; ++b) {
-        for (int s = 0; s < seq_len; ++s) {
-            // Берем один токен
-            Tensor token({1, d_model_});
-            for (int d = 0; d < d_model_; ++d) {
-                token.at({0, d}) = input.at({b, s, d});
-            }
-
-            // Применяем линейные слои
-            Tensor q_token = w_q_->forward(token);
-            Tensor k_token = w_k_->forward(token);
-            Tensor v_token = w_v_->forward(token);
-
-            // Сохраняем результаты
-            for (int d = 0; d < d_model_; ++d) {
-                q.at({b, s, d}) = q_token.at({0, d});
-                k.at({b, s, d}) = k_token.at({0, d});
-                v.at({b, s, d}) = v_token.at({0, d});
-            }
-        }
-    }
+    Tensor q = w_q_->forward(input);
+    Tensor k = w_k_->forward(input);
+    Tensor v = w_v_->forward(input);
 
     q_cache_ = q;
     k_cache_ = k;
     v_cache_ = v;
 
-    // Scaled dot-product attention
     Tensor attn = scaled_dot_product_attention(q, k, v);
-
-    // Выходная проекция (применяем к каждому токену)
-    Tensor output({batch_size, seq_len, d_model_});
-    for (int b = 0; b < batch_size; ++b) {
-        for (int s = 0; s < seq_len; ++s) {
-            Tensor token({1, d_model_});
-            for (int d = 0; d < d_model_; ++d) {
-                token.at({0, d}) = attn.at({b, s, d});
-            }
-
-            Tensor out_token = w_o_->forward(token);
-            for (int d = 0; d < d_model_; ++d) {
-                output.at({b, s, d}) = out_token.at({0, d});
-            }
-        }
-    }
-
-    return output;
+    return w_o_->forward(attn);
 }
 
 Tensor MultiHeadAttention::backward(const Tensor& grad_output, float learning_rate) {
@@ -440,26 +396,7 @@ Tensor GPT::forward(const Tensor& input) {
 }
 
 Tensor GPT::get_logits(const Tensor& hidden_states) {
-    int batch_size = hidden_states.shape()[0];
-    int seq_len = hidden_states.shape()[1];
-
-    Tensor logits({batch_size, seq_len, vocab_size_});
-
-    for (int b = 0; b < batch_size; ++b) {
-        for (int s = 0; s < seq_len; ++s) {
-            Tensor token_emb({1, d_model_});
-            for (int d = 0; d < d_model_; ++d) {
-                token_emb.at({0, d}) = hidden_states.at({b, s, d});
-            }
-
-            Tensor out = lm_head_->forward(token_emb);
-            for (int v = 0; v < vocab_size_; ++v) {
-                logits.at({b, s, v}) = out.at({0, v});
-            }
-        }
-    }
-
-    return logits;
+    return lm_head_->forward(hidden_states);
 }
 
 int GPT::sample_token(const Tensor& logits, float temperature) {
@@ -493,7 +430,7 @@ int GPT::sample_token(const Tensor& logits, float temperature) {
 }
 
 Tensor GPT::backward(const Tensor& grad_output, float learning_rate) {
-    Tensor grad = grad_output;
+    Tensor grad = lm_head_->backward(grad_output, learning_rate);
     grad = final_norm_->backward(grad, learning_rate);
 
     for (int i = blocks_.size() - 1; i >= 0; --i) {
